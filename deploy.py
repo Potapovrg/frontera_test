@@ -11,6 +11,9 @@ Run from the WSL side:
     python3 deploy.py                       # upload + run: python3 run_scan.py
     python3 deploy.py --run "python3 run_scan.py --start 100 --stop 6000 --step 1"
     python3 deploy.py --no-run              # upload only
+    python3 deploy.py --run "python3 app.py --port 8080" --detach
+                                             # upload + start server in the background,
+                                             # survives SSH disconnect, logs to server.log
 
 Defaults target host 192.168.10.2 (orangepi/orangepi).
 """
@@ -32,7 +35,7 @@ REMOTE_DIR = "/home/orangepi/frontera_test"
 DEFAULT_RUN = "python3 run_scan.py"
 
 # Files/dirs never uploaded.
-EXCLUDE = {".claude", ".git", "__pycache__", ".gitignore", ".pytest_cache"}
+EXCLUDE = {".claude", ".git", "__pycache__", ".gitignore", ".pytest_cache", "results"}
 
 LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -90,11 +93,29 @@ def run_remote(client: paramiko.SSHClient, command: str) -> int:
     return stdout.channel.recv_exit_status()
 
 
+def run_remote_detached(client: paramiko.SSHClient, command: str,
+                         log_file: str = "server.log") -> None:
+    """Start a long-running command on the Pi that survives SSH disconnect."""
+    full = (
+        f"cd {REMOTE_DIR} && nohup {command} > {log_file} 2>&1 < /dev/null & "
+        f"echo STARTED_PID:$!"
+    )
+    print(f"\n$ ({HOST}) {full}\n" + "-" * 60)
+    _stdin, stdout, stderr = client.exec_command(full)
+    print(stdout.read().decode(errors="replace").strip())
+    err = stderr.read().decode(errors="replace")
+    if err.strip():
+        sys.stderr.write(err)
+    print(f"detached; tail remote {REMOTE_DIR}/{log_file} to see server output")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Deploy project to OrangePi and run.")
     ap.add_argument("--host", default=HOST)
     ap.add_argument("--run", default=DEFAULT_RUN, help="remote command to run")
     ap.add_argument("--no-run", action="store_true", help="upload only")
+    ap.add_argument("--detach", action="store_true",
+                    help="start --run in the background (nohup) and return immediately")
     args = ap.parse_args()
 
     client = paramiko.SSHClient()
@@ -110,6 +131,9 @@ def main() -> int:
         print(f"uploaded {n} file(s)")
 
         if args.no_run:
+            return 0
+        if args.detach:
+            run_remote_detached(client, args.run)
             return 0
         rc = run_remote(client, args.run)
         print("-" * 60 + f"\nremote exit code: {rc}")

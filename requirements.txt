@@ -1,0 +1,7 @@
+# Runtime deps for app.py (all already present on the OrangePi image).
+numpy>=1.23
+pyserial>=3.5
+matplotlib>=3.5
+
+# deploy.py (WSL/dev side only, not needed on the OrangePi):
+# paramiko>=3.0
