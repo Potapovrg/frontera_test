@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from frontera_interface import FronteraInterface
+from frontera_interface import FronteraInterface, find_sa6
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +54,23 @@ class DeviceManager:
 
     def _connect_or_raise(self) -> None:
         dev = FronteraInterface()
-        if not dev.connect(self.port):
-            raise DeviceError(f"could not open serial port {self.port}")
-        self._dev = dev
-        logger.info("connected to Frontera on %s", self.port)
+        if dev.connect(self.port):
+            self._dev = dev
+            logger.info("connected to Frontera on %s", self.port)
+            return
+
+        # The device can re-enumerate under a different node after a USB
+        # disconnect (e.g. /dev/ttyACM0 -> /dev/ttyACM1), so fall back to
+        # probing before giving up.
+        logger.warning("could not open %s, probing for the device...", self.port)
+        found = find_sa6()
+        if found and dev.connect(found):
+            self.port = found
+            self._dev = dev
+            logger.info("connected to Frontera on %s (auto-detected)", self.port)
+            return
+
+        raise DeviceError(f"could not open serial port {self.port} (auto-detect also failed)")
 
     def sweep(self, start_mhz: float, stop_mhz: float, step_mhz: float) -> SweepResult:
         """Run one sweep. Thread-safe; retries once by reconnecting on failure."""
@@ -78,18 +91,31 @@ class DeviceManager:
 
     def _scan(self, start_mhz: float, stop_mhz: float, step_mhz: float):
         assert self._dev is not None
-        return self._dev.scan_chunked_mhz(
-            start_mhz,
-            stop_mhz,
-            step_mhz=step_mhz,
-            samples=self.samples,
-            timeout_ms=self.timeout_ms,
-            timeout=self.scan_timeout_s,
-        )
+        try:
+            return self._dev.scan_chunked_mhz(
+                start_mhz,
+                stop_mhz,
+                step_mhz=step_mhz,
+                samples=self.samples,
+                timeout_ms=self.timeout_ms,
+                timeout=self.scan_timeout_s,
+            )
+        except OSError as exc:
+            # Raw serial I/O errors (device unplugged/reset mid-scan, e.g.
+            # termios "Input/output error") surface here instead of the
+            # graceful None that frontera_interface returns on a plain
+            # timeout. Treat them the same way so sweep()'s reconnect+retry
+            # kicks in, rather than letting the exception escape all the way
+            # up to the HTTP handler and kill the connection with no response.
+            logger.error("scan I/O error: %s", exc)
+            return None
 
     def _reconnect(self) -> None:
         if self._dev is not None:
-            self._dev.disconnect()
+            try:
+                self._dev.disconnect()
+            except OSError:
+                pass
         time.sleep(1.0)
         self._connect_or_raise()
 

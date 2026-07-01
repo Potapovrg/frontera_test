@@ -26,6 +26,13 @@ Open `http://localhost:8080/`.
 python3 app.py --port 8080                    # device_port defaults to /dev/ttyACM0
 ```
 
+The Frontera can re-enumerate under a different node after a USB
+disconnect/reset (e.g. `/dev/ttyACM0` -> `/dev/ttyACM1`). If `--device-port`
+fails to open, `DeviceManager` automatically falls back to probing all
+serial ports (`find_sa6()`) and switches to whatever port responds, both at
+startup and on reconnect after a failed sweep — no manual `--device-port`
+update needed.
+
 ## Deploy from WSL
 
 ```bash

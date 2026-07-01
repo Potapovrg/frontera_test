@@ -58,6 +58,12 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
 
         # -- routing -----------------------------------------------------
         def do_GET(self):
+            try:
+                self._route_get()
+            except Exception as exc:  # noqa: BLE001 - last-resort safety net
+                self._send_unexpected_error(exc)
+
+        def _route_get(self):
             # Strip the query string (e.g. "?t=..." cache-busters) before routing —
             # otherwise it gets treated as part of the filename in /plot,/report,/data.
             path = urlsplit(self.path).path
@@ -80,6 +86,12 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 self.end_headers()
 
         def do_POST(self):
+            try:
+                self._route_post()
+            except Exception as exc:  # noqa: BLE001 - last-resort safety net
+                self._send_unexpected_error(exc)
+
+        def _route_post(self):
             if self.path == "/api/sweep":
                 self._handle_sweep()
             elif self.path == "/api/report":
@@ -89,6 +101,17 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
             else:
                 self.send_response(404)
                 self.end_headers()
+
+        def _send_unexpected_error(self, exc: Exception) -> None:
+            # A route handler raised something we didn't anticipate (e.g. a raw
+            # serial I/O error escaping the device layer). Without this, the
+            # connection would be dropped with zero bytes of response, which
+            # browsers report as a generic "Failed to fetch" with no detail.
+            logger.exception("unhandled error handling %s", self.path)
+            try:
+                self._send_json(500, {"error": f"internal error: {exc}"})
+            except Exception:
+                pass  # response likely already partially sent; nothing more we can do
 
         # -- handlers ------------------------------------------------------
         def _handle_sweep(self):
