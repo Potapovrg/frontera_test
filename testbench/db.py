@@ -62,3 +62,16 @@ class JournalDB:
                 "SELECT * FROM comparisons WHERE id=?", (comparison_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def delete(self, ids: List[int]) -> List[dict]:
+        """Delete rows by id. Returns the deleted rows so the caller can also
+        remove their associated files on disk."""
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock, self._connect() as con:
+            rows = con.execute(
+                f"SELECT * FROM comparisons WHERE id IN ({placeholders})", ids
+            ).fetchall()
+            con.execute(f"DELETE FROM comparisons WHERE id IN ({placeholders})", ids)
+        return [dict(r) for r in rows]

@@ -21,7 +21,7 @@ def make_stamp() -> str:
 
 def utc_now_str() -> str:
     """Human-readable UTC timestamp for display/DB (not filename-safe)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M:%S")
 
 
 def save_sweep(cfg: Config, block: str, stamp: str, sweep: SweepResult) -> str:
@@ -50,3 +50,15 @@ def safe_path(root: Path, filename: str) -> Path:
     if fp.parent != root_resolved:
         raise FileNotFoundError(filename)
     return fp
+
+
+def remove_if_exists(root: Path, filename: str) -> None:
+    """Delete filename under root if present; ignores path traversal / missing file."""
+    try:
+        fp = safe_path(root, filename)
+    except FileNotFoundError:
+        return
+    try:
+        fp.unlink()
+    except FileNotFoundError:
+        pass

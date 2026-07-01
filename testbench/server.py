@@ -84,6 +84,8 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 self._handle_sweep()
             elif self.path == "/api/report":
                 self._handle_report()
+            elif self.path == "/api/journal/delete":
+                self._handle_journal_delete()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -117,7 +119,7 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
             stamp = storage.make_stamp()
             npz_name = storage.save_sweep(cfg, block, stamp, sweep)
             peak_dbm, peak_freq = plotting.peak_info(sweep.freq_mhz, sweep.power_dbm)
-            title = f"Block {block} — {conditions or stamp}"
+            title = f"Block {block} — {conditions or storage.utc_now_str()}"
             png_name = plotting.spectrum_png(
                 cfg, stamp, block, sweep.freq_mhz, sweep.power_dbm, title
             )
@@ -176,6 +178,24 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
             })
 
             self._send_json(200, {"pdf_url": f"/report/{pdf_name}", "comparison_id": comparison_id})
+
+        def _handle_journal_delete(self):
+            body = self._read_json()
+            try:
+                ids = [int(i) for i in body.get("ids", [])]
+            except (TypeError, ValueError):
+                self._send_json(400, {"error": "ids must be a list of integers"})
+                return
+
+            rows = db.delete(ids)
+            for row in rows:
+                storage.remove_if_exists(cfg.plots_dir, row.get("png_a") or "")
+                storage.remove_if_exists(cfg.plots_dir, row.get("png_b") or "")
+                storage.remove_if_exists(cfg.data_dir, row.get("npy_a") or "")
+                storage.remove_if_exists(cfg.data_dir, row.get("npy_b") or "")
+                storage.remove_if_exists(cfg.reports_dir, row.get("pdf_path") or "")
+
+            self._send_json(200, {"deleted": len(rows)})
 
     return Handler
 
