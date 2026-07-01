@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 from . import pages, plotting, storage
 from .config import Config
@@ -57,19 +58,22 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
 
         # -- routing -----------------------------------------------------
         def do_GET(self):
-            if self.path == "/" or self.path.startswith("/index"):
+            # Strip the query string (e.g. "?t=..." cache-busters) before routing —
+            # otherwise it gets treated as part of the filename in /plot,/report,/data.
+            path = urlsplit(self.path).path
+            if path == "/" or path.startswith("/index"):
                 self._send(200, pages.comparison_page())
-            elif self.path == "/journal":
+            elif path == "/journal":
                 self._send(200, pages.journal_page())
-            elif self.path == "/api/journal":
+            elif path == "/api/journal":
                 self._send_json(200, db.recent())
-            elif self.path.startswith("/plot/"):
-                self._serve_file(cfg.plots_dir, self.path[len("/plot/"):], "image/png")
-            elif self.path.startswith("/report/"):
-                self._serve_file(cfg.reports_dir, self.path[len("/report/"):], "application/pdf")
-            elif self.path.startswith("/data/"):
+            elif path.startswith("/plot/"):
+                self._serve_file(cfg.plots_dir, path[len("/plot/"):], "image/png")
+            elif path.startswith("/report/"):
+                self._serve_file(cfg.reports_dir, path[len("/report/"):], "application/pdf")
+            elif path.startswith("/data/"):
                 self._serve_file(
-                    cfg.data_dir, self.path[len("/data/"):], "application/octet-stream"
+                    cfg.data_dir, path[len("/data/"):], "application/octet-stream"
                 )
             else:
                 self.send_response(404)
