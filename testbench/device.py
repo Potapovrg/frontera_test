@@ -9,6 +9,7 @@ request thread.
 from __future__ import annotations
 
 import logging
+import termios
 import threading
 import time
 from dataclasses import dataclass
@@ -18,6 +19,13 @@ import numpy as np
 from frontera_interface import FronteraInterface, find_sa6
 
 logger = logging.getLogger(__name__)
+
+# Low-level failures from an unplugged/replugged serial device surface as
+# either OSError (e.g. serial.SerialException, which subclasses it) or a
+# bare termios.error ("Input/output error") — termios.error is its own
+# exception class and does NOT subclass OSError, so both must be listed
+# explicitly or termios-raised errors slip past an `except OSError`.
+_SERIAL_ERRORS = (OSError, termios.error)
 
 
 @dataclass
@@ -54,7 +62,7 @@ class DeviceManager:
 
     def _connect_or_raise(self) -> None:
         dev = FronteraInterface()
-        if dev.connect(self.port):
+        if self._try_connect(dev, self.port):
             self._dev = dev
             logger.info("connected to Frontera on %s", self.port)
             return
@@ -64,13 +72,21 @@ class DeviceManager:
         # probing before giving up.
         logger.warning("could not open %s, probing for the device...", self.port)
         found = find_sa6()
-        if found and dev.connect(found):
+        if found and self._try_connect(dev, found):
             self.port = found
             self._dev = dev
             logger.info("connected to Frontera on %s (auto-detected)", self.port)
             return
 
         raise DeviceError(f"could not open serial port {self.port} (auto-detect also failed)")
+
+    @staticmethod
+    def _try_connect(dev: FronteraInterface, port: str) -> bool:
+        try:
+            return dev.connect(port)
+        except _SERIAL_ERRORS as exc:
+            logger.warning("connect to %s failed: %s", port, exc)
+            return False
 
     def sweep(self, start_mhz: float, stop_mhz: float, step_mhz: float) -> SweepResult:
         """Run one sweep. Thread-safe; retries once by reconnecting on failure."""
@@ -100,7 +116,7 @@ class DeviceManager:
                 timeout_ms=self.timeout_ms,
                 timeout=self.scan_timeout_s,
             )
-        except OSError as exc:
+        except _SERIAL_ERRORS as exc:
             # Raw serial I/O errors (device unplugged/reset mid-scan, e.g.
             # termios "Input/output error") surface here instead of the
             # graceful None that frontera_interface returns on a plain
@@ -114,7 +130,7 @@ class DeviceManager:
         if self._dev is not None:
             try:
                 self._dev.disconnect()
-            except OSError:
+            except _SERIAL_ERRORS:
                 pass
         time.sleep(1.0)
         self._connect_or_raise()
@@ -139,4 +155,7 @@ class DeviceManager:
 
     def close(self) -> None:
         if self._dev is not None:
-            self._dev.disconnect()
+            try:
+                self._dev.disconnect()
+            except _SERIAL_ERRORS:
+                pass
