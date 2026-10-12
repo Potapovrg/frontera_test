@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from . import pages, plotting, storage
-from .config import Config
+from .config import DEVICE_MODES, Config
 from .db import JournalDB
 from .device import DeviceError, DeviceManager
 
@@ -68,11 +68,15 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
             # otherwise it gets treated as part of the filename in /plot,/report,/data.
             path = urlsplit(self.path).path
             if path == "/" or path.startswith("/index"):
-                self._send(200, pages.comparison_page())
+                self._send(200, pages.comparison_page(cfg))
+            elif path == "/single":
+                self._send(200, pages.single_page(cfg))
             elif path == "/journal":
                 self._send(200, pages.journal_page())
             elif path == "/api/journal":
                 self._send_json(200, db.recent())
+            elif path == "/api/hardware":
+                self._send_json(200, device.status())
             elif path.startswith("/plot/"):
                 self._serve_file(cfg.plots_dir, path[len("/plot/"):], "image/png")
             elif path.startswith("/report/"):
@@ -92,12 +96,23 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 self._send_unexpected_error(exc)
 
         def _route_post(self):
-            if self.path == "/api/sweep":
+            # Same urlsplit as _route_get — a query string on a POST would
+            # otherwise miss every route and 404.
+            path = urlsplit(self.path).path
+            if path == "/api/sweep":
                 self._handle_sweep()
-            elif self.path == "/api/report":
+            elif path == "/api/report":
                 self._handle_report()
-            elif self.path == "/api/journal/delete":
+            elif path == "/api/single/report":
+                self._handle_single_report()
+            elif path == "/api/journal/delete":
                 self._handle_journal_delete()
+            elif path == "/api/hardware/mode":
+                self._handle_set_mode()
+            elif path == "/api/hardware/probe":
+                self._handle_probe()
+            elif path == "/api/switcher":
+                self._handle_switcher()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -114,12 +129,39 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 pass  # response likely already partially sent; nothing more we can do
 
         # -- handlers ------------------------------------------------------
+        def _handle_set_mode(self):
+            body = self._read_json()
+            mode = str(body.get("mode", ""))
+            if mode not in DEVICE_MODES:
+                self._send_json(400, {"error": f"unknown mode {mode!r}"})
+                return
+            device.set_mode(mode)
+            logger.info("device mode -> %s", mode)
+            self._send_json(200, device.status())
+
+        def _handle_probe(self):
+            """Re-resolve every port without changing the mode."""
+            device.set_mode(cfg.mode())
+            self._send_json(200, device.status())
+
+        def _handle_switcher(self):
+            body = self._read_json()
+            action = str(body.get("action", ""))
+            try:
+                reply = device.switcher_command(action)
+            except DeviceError as exc:
+                self._send_json(502, {"error": str(exc)})
+                return
+            self._send_json(200, {"reply": reply, "hardware": device.status()})
+
         def _handle_sweep(self):
             try:
                 body = self._read_json()
                 block = body.get("block")
-                if block not in ("A", "B"):
-                    self._send_json(400, {"error": "block must be A or B"})
+                # "S" is the single-test page's slot, kept apart from A/B so a
+                # single run never clobbers a comparison in progress.
+                if block not in ("A", "B", "S"):
+                    self._send_json(400, {"error": "block must be A, B or S"})
                     return
                 start = float(body["start"])
                 stop = float(body["stop"])
@@ -127,6 +169,14 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 conditions = str(body.get("conditions", ""))
                 if not (0 < step) or not (start < stop):
                     self._send_json(400, {"error": "invalid start/stop/step"})
+                    return
+                # The topology's real ceiling — 6200 MHz without the shifter,
+                # 12200 with it. Previously unchecked, so 12000 could be typed
+                # into a plain single-device bench and come back as garbage.
+                if stop > cfg.max_stop_mhz():
+                    self._send_json(400, {"error":
+                        f"mode '{cfg.mode_label()}' measures up to "
+                        f"{cfg.max_stop_mhz():.0f} MHz"})
                     return
             except (KeyError, ValueError, TypeError) as exc:
                 self._send_json(400, {"error": f"bad request: {exc}"})
@@ -142,9 +192,12 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
             stamp = storage.make_stamp()
             npz_name = storage.save_sweep(cfg, block, stamp, sweep)
             peak_dbm, peak_freq = plotting.peak_info(sweep.freq_mhz, sweep.power_dbm)
-            title = f"Block {block} — {conditions or storage.utc_now_str()}"
+            setup = cfg.mode_label()
+            label = "Device" if block == "S" else f"Block {block}"
+            title = f"{label} — {conditions or storage.utc_now_str()}"
             png_name = plotting.spectrum_png(
-                cfg, stamp, block, sweep.freq_mhz, sweep.power_dbm, title
+                cfg, stamp, block, sweep.freq_mhz, sweep.power_dbm, title,
+                mark_peak=(block == "S"),
             )
 
             with state_lock:
@@ -155,6 +208,8 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                     "npz": npz_name, "png": png_name,
                     "peak_dbm": peak_dbm, "peak_freq": peak_freq,
                     "n_points": int(sweep.freq_mhz.size),
+                    "device_mode": cfg.mode(), "setup": setup,
+                    "bands": json.dumps(sweep.bands),
                 }
 
             self._send_json(200, {
@@ -162,6 +217,8 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 "peak_dbm": peak_dbm,
                 "peak_freq": peak_freq,
                 "n_points": int(sweep.freq_mhz.size),
+                "setup": setup,
+                "bands": sweep.bands,
             })
 
         def _handle_report(self):
@@ -174,12 +231,26 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
 
             stamp = storage.make_stamp()
             ts_utc = storage.utc_now_str()
-            meta = {
-                "ts_utc": ts_utc,
-                "start_a": rec_a["start"], "stop_a": rec_a["stop"], "step_a": rec_a["step"],
-                "start_b": rec_b["start"], "stop_b": rec_b["stop"], "step_b": rec_b["step"],
-                "conditions_a": rec_a["conditions"], "conditions_b": rec_b["conditions"],
-            }
+            # One place where a block's in-memory fields map to the suffixed
+            # column/meta names, so the report and the journal row can never
+            # drift apart as fields are added.
+            record = {"ts_utc": ts_utc}
+            for suffix, rec in (("a", rec_a), ("b", rec_b)):
+                record.update({
+                    f"start_{suffix}": rec["start"],
+                    f"stop_{suffix}": rec["stop"],
+                    f"step_{suffix}": rec["step"],
+                    f"conditions_{suffix}": rec["conditions"],
+                    f"npy_{suffix}": rec["npz"],
+                    f"png_{suffix}": rec["png"],
+                    f"peak_dbm_{suffix}": rec["peak_dbm"],
+                    f"peak_freq_{suffix}": rec["peak_freq"],
+                    f"n_points_{suffix}": rec["n_points"],
+                    f"device_mode_{suffix}": rec["device_mode"],
+                    f"bands_{suffix}": rec["bands"],
+                })
+
+            meta = dict(record, setup_a=rec_a["setup"], setup_b=rec_b["setup"])
             pdf_name = plotting.comparison_pdf(
                 cfg, stamp,
                 rec_a["freq_mhz"], rec_a["power_dbm"],
@@ -187,19 +258,31 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 meta,
             )
 
-            comparison_id = db.insert({
-                "ts_utc": ts_utc,
-                "start_a": rec_a["start"], "stop_a": rec_a["stop"], "step_a": rec_a["step"],
-                "start_b": rec_b["start"], "stop_b": rec_b["stop"], "step_b": rec_b["step"],
-                "conditions_a": rec_a["conditions"], "conditions_b": rec_b["conditions"],
-                "npy_a": rec_a["npz"], "npy_b": rec_b["npz"],
-                "png_a": rec_a["png"], "png_b": rec_b["png"],
-                "peak_dbm_a": rec_a["peak_dbm"], "peak_freq_a": rec_a["peak_freq"],
-                "peak_dbm_b": rec_b["peak_dbm"], "peak_freq_b": rec_b["peak_freq"],
-                "n_points_a": rec_a["n_points"], "n_points_b": rec_b["n_points"],
-                "pdf_path": pdf_name,
-            })
+            comparison_id = db.insert(dict(record, pdf_path=pdf_name))
 
+            self._send_json(200, {"pdf_url": f"/report/{pdf_name}", "comparison_id": comparison_id})
+
+        def _handle_single_report(self):
+            with state_lock:
+                rec = current.get("S")
+            if rec is None:
+                self._send_json(400, {"error": "run the test first"})
+                return
+
+            stamp = storage.make_stamp()
+            record = {"ts_utc": storage.utc_now_str(), "kind": "single"}
+            record.update({
+                "start_a": rec["start"], "stop_a": rec["stop"], "step_a": rec["step"],
+                "conditions_a": rec["conditions"], "npy_a": rec["npz"], "png_a": rec["png"],
+                "peak_dbm_a": rec["peak_dbm"], "peak_freq_a": rec["peak_freq"],
+                "n_points_a": rec["n_points"], "device_mode_a": rec["device_mode"],
+                "bands_a": rec["bands"],
+            })
+            pdf_name = plotting.single_pdf(
+                cfg, stamp, rec["freq_mhz"], rec["power_dbm"],
+                dict(record, setup_a=rec["setup"]),
+            )
+            comparison_id = db.insert(dict(record, pdf_path=pdf_name))
             self._send_json(200, {"pdf_url": f"/report/{pdf_name}", "comparison_id": comparison_id})
 
         def _handle_journal_delete(self):

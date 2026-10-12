@@ -34,10 +34,10 @@ Wide range with automatic chunking::
     port = find_sa6()
     with FronteraInterface() as dev:
         dev.connect(port)
-        # Scans 100–6000 MHz in ~600-point chunks, with persistent buffer.
+        # Scans 100–6200 MHz in ~600-point chunks, with persistent buffer.
         # Repeated calls for the same range update only changed chunks —
         # failed chunks retain their previous data (no chart flicker).
-        result = dev.scan_chunked_mhz(100.0, 6000.0, step_mhz=1.0)
+        result = dev.scan_chunked_mhz(100.0, 6200.0, step_mhz=1.0)
         for pt in result.points:
             print(f"{pt.freq_mhz:.1f} MHz  {pt.amplitude_dbm:.1f} dBm")
 
@@ -50,10 +50,11 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 import serial
@@ -128,7 +129,7 @@ class ScanResult:
 # Module-level helper: auto-detect the SA6 port
 # ---------------------------------------------------------------------------
 
-def find_sa6() -> Optional[str]:
+def find_sa6(exclude: Iterable[str] = ()) -> Optional[str]:
     """
     Probe USB/ACM serial ports and return the first one that responds
     to an SA6 scan command.  Returns None if no SA6 is found.
@@ -138,11 +139,17 @@ def find_sa6() -> Optional[str]:
     1. List COM/ACM ports whose description or device path looks USB-related.
     2. Send a minimal scn20 probe (5800–5810 MHz, 1 MHz step, index=1).
     3. If the response contains ``b"scn20"`` this is the SA6 port.
+
+    ``exclude`` skips given device paths (resolved via realpath) — used to keep
+    this probe off the hardware frequency shifter, which now sits permanently
+    on its own USB-serial port and would otherwise be probed like an SDR.
     """
+    excluded_real = {os.path.realpath(e) for e in exclude if e}
     candidates = [
         p.device
         for p in serial.tools.list_ports.comports()
-        if ("USB"    in (p.description or "").upper()
+        if os.path.realpath(p.device) not in excluded_real
+        and ("USB"    in (p.description or "").upper()
             or "USB"    in (p.device or "").upper()
             or "ACM"    in (p.device or "").upper()
             or "SERIAL" in (p.description or "").upper()
@@ -440,7 +447,7 @@ class FronteraInterface:
         start_mhz:
             Start of the full sweep range in MHz (e.g. ``100.0``).
         stop_mhz:
-            End of the full sweep range in MHz (e.g. ``6000.0``).
+            End of the full sweep range in MHz (e.g. ``6200.0``).
         step_mhz:
             Frequency step in MHz (default ``1.0``).
         **kwargs:

@@ -11,6 +11,10 @@ Usage
     python3 app.py                          # real device on /dev/ttyACM0, port 8080
     python3 app.py --mock                   # no hardware needed, synthetic spectra
     python3 app.py --device-port /dev/ttyACM1 --port 8090
+    python3 app.py --device-mode 2_device   # two Fronteras + frequency shifter
+
+--device-mode only sets the *starting* topology; the operator switches it in
+the web UI without restarting the server.
 """
 from __future__ import annotations
 
@@ -19,9 +23,9 @@ import logging
 import sys
 from pathlib import Path
 
-from testbench.config import Config
+from testbench.config import DEVICE_MODES, Config
 from testbench.db import JournalDB
-from testbench.device import DeviceError, DeviceManager
+from testbench.device import DeviceManager
 from testbench.server import serve
 
 logging.basicConfig(
@@ -36,7 +40,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Frontera comparison test web app.")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--device-port", default="/dev/ttyACM0")
+    ap.add_argument("--device-port", default="/dev/ttyACM0",
+                    help="low-band Frontera; blank/failed -> /dev/frontera1 or probe")
+    ap.add_argument("--device-port2", default="",
+                    help="Frontera behind the shifter; blank -> /dev/frontera2 or probe")
+    ap.add_argument("--switcher-port", default="",
+                    help="frequency shifter; blank -> /dev/switcher or ping-probe")
+    ap.add_argument("--device-mode", default=DEVICE_MODES[0], choices=DEVICE_MODES,
+                    help="starting hardware topology (switchable in the UI)")
+    ap.add_argument("--offset2-mhz", type=float, default=6000.0,
+                    help="frequency the shifter moves the high band by")
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--mock", action="store_true", help="synthesize spectra, no hardware")
     args = ap.parse_args()
@@ -45,26 +58,26 @@ def main() -> int:
         http_host=args.host,
         http_port=args.port,
         device_port=args.device_port,
+        device_port2=args.device_port2,
+        switcher_port=args.switcher_port,
+        device_mode=args.device_mode,
+        offset2_mhz=args.offset2_mhz,
         mock=args.mock,
         results_dir=Path(args.results_dir),
     )
     cfg.ensure_dirs()
 
-    try:
-        device = DeviceManager(
-            port=cfg.device_port,
-            mock=cfg.mock,
-            samples=cfg.samples,
-            timeout_ms=cfg.timeout_ms,
-            scan_timeout_s=cfg.scan_timeout_s,
-        )
-    except DeviceError as exc:
-        logger.error("cannot start: %s", exc)
-        return 1
+    # Deliberately not fatal: with a runtime mode switcher in the UI, missing
+    # hardware is a state the operator has to see and fix (wrong mode selected,
+    # shifter not plugged in yet), not a reason to refuse to start.
+    device = DeviceManager(cfg)
+    if device.error:
+        logger.error("hardware incomplete: %s", device.error)
+        logger.error("server is up — pick a mode / check the connection in the web UI")
 
     db = JournalDB(str(cfg.db_path))
     httpd = serve(cfg, device, db)
-    logger.info("mock mode: %s", cfg.mock)
+    logger.info("mode: %s | mock: %s", cfg.mode_label(), cfg.mock)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

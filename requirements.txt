@@ -5,3 +5,6 @@ matplotlib>=3.5
 
 # deploy.py (WSL/dev side only, not needed on the OrangePi):
 # paramiko>=3.0
+
+# tests/ (dev side only):
+# pytest>=7.0

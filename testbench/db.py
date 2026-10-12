@@ -22,9 +22,23 @@ CREATE TABLE IF NOT EXISTS comparisons (
     peak_dbm_a   REAL,  peak_freq_a REAL,
     peak_dbm_b   REAL,  peak_freq_b REAL,
     n_points_a   INTEGER, n_points_b INTEGER,
-    pdf_path     TEXT
+    pdf_path     TEXT,
+    device_mode_a TEXT, device_mode_b TEXT,
+    bands_a       TEXT, bands_b       TEXT,
+    kind          TEXT DEFAULT 'comparison'
 );
 """
+
+# Columns added after the table shipped. There is a live journal.db on the
+# OrangePi, so new fields are added by ALTER TABLE rather than by bumping
+# _CREATE_SQL alone (which only ever runs on a fresh file).
+_ADDED_COLUMNS = {
+    "device_mode_a": "TEXT",
+    "device_mode_b": "TEXT",
+    "bands_a": "TEXT",   # JSON: [{"label","start","stop","offset"}, ...]
+    "bands_b": "TEXT",
+    "kind": "TEXT DEFAULT 'comparison'",   # 'comparison' | 'single' (single fills only the _a fields)
+}
 
 
 class JournalDB:
@@ -33,6 +47,14 @@ class JournalDB:
         self._lock = threading.Lock()
         with self._connect() as con:
             con.execute(_CREATE_SQL)
+            self._migrate(con)
+
+    @staticmethod
+    def _migrate(con: sqlite3.Connection) -> None:
+        existing = {r["name"] for r in con.execute("PRAGMA table_info(comparisons)")}
+        for name, decl in _ADDED_COLUMNS.items():
+            if name not in existing:
+                con.execute(f"ALTER TABLE comparisons ADD COLUMN {name} {decl}")
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path, check_same_thread=False)

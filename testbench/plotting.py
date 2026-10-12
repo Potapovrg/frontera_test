@@ -25,24 +25,48 @@ logger = logging.getLogger(__name__)
 
 
 def peak_info(freq: np.ndarray, power: np.ndarray) -> Tuple[float, float]:
-    """Return (peak_dbm, peak_freq_mhz)."""
-    i = int(np.argmax(power))
+    """Return (peak_dbm, peak_freq_mhz).
+
+    NaN-aware: a stitched multi-band trace carries one NaN power sample per
+    band gap (see device._stitch), which plain argmax would happily return.
+    """
+    if not np.any(np.isfinite(power)):
+        return float("nan"), float("nan")
+    i = int(np.nanargmax(power))
     return float(power[i]), float(freq[i])
 
 
 def _draw_spectrum(ax, freq: np.ndarray, power: np.ndarray, label: str, color: str) -> None:
     ax.plot(freq, power, color=color, linewidth=0.8, label=label)
-    ax.fill_between(freq, power, power.min() - 2, color=color, alpha=0.15)
+    # nanmin, not min: one NaN in a stitched trace would otherwise make the
+    # fill baseline NaN and silently drop the fill entirely.
+    ax.fill_between(freq, power, np.nanmin(power) - 2, color=color, alpha=0.15)
     ax.set_xlabel("Frequency (MHz)")
     ax.set_ylabel("Power (dBm)")
     ax.grid(True, linewidth=0.4, alpha=0.5)
 
 
+def _mark_peak(ax, freq: np.ndarray, power: np.ndarray) -> None:
+    """Mark the highest-amplitude point with a dot and a "f MHz, X dBm" label."""
+    peak_dbm, peak_freq = peak_info(freq, power)
+    if not np.isfinite(peak_dbm):
+        return
+    ax.plot([peak_freq], [peak_dbm], marker="o", color="#da3633", markersize=6, zorder=5)
+    ax.annotate(f"{peak_freq:.1f} MHz, {peak_dbm:.1f} dBm", (peak_freq, peak_dbm),
+                xytext=(0, 10), textcoords="offset points", ha="center", fontsize=9,
+                color="#da3633", weight="bold", zorder=5,
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#da3633", lw=0.6))
+    lo, hi = ax.get_ylim()
+    ax.set_ylim(lo, hi + 0.08 * (hi - lo))   # headroom so the label is not clipped
+
+
 def spectrum_png(cfg: Config, stamp: str, block: str, freq: np.ndarray, power: np.ndarray,
-                  title: str) -> str:
+                  title: str, mark_peak: bool = False) -> str:
     """Render one spectrum trace to PNG under cfg.plots_dir. Returns the filename."""
     fig, ax = plt.subplots(figsize=(10, 4.5), dpi=150, facecolor="white")
     _draw_spectrum(ax, freq, power, label=block, color="#1f6feb")
+    if mark_peak:
+        _mark_peak(ax, freq, power)
     ax.set_title(title, fontsize=11)
     fig.tight_layout()
 
@@ -109,15 +133,53 @@ def comparison_pdf(
     return name
 
 
+def single_pdf(cfg: Config, stamp: str, freq: np.ndarray, power: np.ndarray, meta: dict) -> str:
+    """Two-page report for one device: title page, then the spectrum with its peak marked."""
+    name = f"{stamp}_single.pdf"
+    with PdfPages(cfg.reports_dir / name) as pdf:
+        fig = plt.figure(figsize=(10, 6.5), dpi=150, facecolor="white")
+        fig.text(0.5, 0.92, "Frontera Single Test Report", fontsize=16,
+                 ha="center", weight="bold")
+        fig.text(0.08, 0.82, f"Generated: {meta['ts_utc']}", fontsize=10)
+        fig.text(0.08, 0.72, "Device parameters", fontsize=12, weight="bold", color="#1f6feb")
+        fig.text(0.08, 0.66,
+                 f"Start: {meta['start_a']:.1f} MHz   Stop: {meta['stop_a']:.1f} MHz   "
+                 f"Step: {meta['step_a']:.3f} MHz", fontsize=10)
+        fig.text(0.08, 0.625, f"Bench setup: {meta.get('setup_a', '-')}", fontsize=9,
+                 color="#57606a")
+        fig.text(0.08, 0.59,
+                 f"Peak: {meta['peak_dbm_a']:.1f} dBm @ {meta['peak_freq_a']:.1f} MHz",
+                 fontsize=10, weight="bold", color="#da3633")
+        fig.text(0.08, 0.55, "Test conditions:", fontsize=10, weight="bold")
+        fig.text(0.08, 0.50, _wrap(meta.get("conditions_a", "")), fontsize=9, va="top")
+        pdf.savefig(fig, facecolor="white")
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(10, 4.5), dpi=150, facecolor="white")
+        _draw_spectrum(ax, freq, power, label="Device", color="#1f6feb")
+        _mark_peak(ax, freq, power)
+        ax.set_title("Spectrum")
+        fig.tight_layout()
+        pdf.savefig(fig, facecolor="white")
+        plt.close(fig)
+    return name
+
+
 def _difference(
     freq_a: np.ndarray, power_a: np.ndarray, freq_b: np.ndarray, power_b: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Interpolate B onto A's frequency grid and return (freq, B - A) over the overlap."""
+    """Interpolate B onto A's frequency grid and return (freq, B - A) over the overlap.
+
+    np.interp has no notion of missing data, so B's band-gap NaNs are dropped
+    from the interpolation input first. A's own NaNs are left in place — they
+    break the difference line at the gap, which is where it belongs.
+    """
     lo = max(freq_a.min(), freq_b.min())
     hi = min(freq_a.max(), freq_b.max())
     mask = (freq_a >= lo) & (freq_a <= hi)
     freq = freq_a[mask]
-    power_b_on_a = np.interp(freq, freq_b, power_b)
+    finite_b = np.isfinite(power_b)
+    power_b_on_a = np.interp(freq, freq_b[finite_b], power_b[finite_b])
     return freq, power_b_on_a - power_a[mask]
 
 
@@ -134,6 +196,8 @@ def _add_title_page(pdf: PdfPages, meta: dict) -> None:
         f"Step: {meta['step_a']:.3f} MHz",
         fontsize=10,
     )
+    fig.text(0.08, 0.625, f"Bench setup: {meta.get('setup_a', '-')}", fontsize=9,
+             color="#57606a")
     fig.text(0.08, 0.60, "Test conditions:", fontsize=10, weight="bold")
     fig.text(0.08, 0.54, _wrap(meta.get("conditions_a", "")), fontsize=9, va="top")
 
@@ -144,6 +208,8 @@ def _add_title_page(pdf: PdfPages, meta: dict) -> None:
         f"Step: {meta['step_b']:.3f} MHz",
         fontsize=10,
     )
+    fig.text(0.08, 0.325, f"Bench setup: {meta.get('setup_b', '-')}", fontsize=9,
+             color="#57606a")
     fig.text(0.08, 0.30, "Test conditions:", fontsize=10, weight="bold")
     fig.text(0.08, 0.24, _wrap(meta.get("conditions_b", "")), fontsize=9, va="top")
 
