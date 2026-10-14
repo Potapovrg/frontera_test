@@ -40,7 +40,7 @@ class Config:
     http_host: str = "0.0.0.0"
     http_port: int = 8080
 
-    device_port: str = "/dev/ttyACM0"
+    device_port: str = ""       # blank -> /dev/frontera1 symlink, else probe
     mock: bool = False
 
     # -- hardware topology --------------------------------------------------

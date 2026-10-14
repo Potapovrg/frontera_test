@@ -40,7 +40,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Frontera comparison test web app.")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--device-port", default="/dev/ttyACM0",
+    ap.add_argument("--device-port", default="",
                     help="low-band Frontera; blank/failed -> /dev/frontera1 or probe")
     ap.add_argument("--device-port2", default="",
                     help="Frontera behind the shifter; blank -> /dev/frontera2 or probe")

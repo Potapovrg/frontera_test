@@ -71,7 +71,7 @@ Open `http://localhost:8080/`.
 ## Run on the OrangePi (real device)
 
 ```bash
-python3 app.py --port 8080                       # device_port defaults to /dev/ttyACM0
+python3 app.py --port 8080                       # ports auto-resolved (symlink, then probe)
 python3 app.py --port 8080 --device-mode 2_device  # start in the two-device topology
 ```
 
