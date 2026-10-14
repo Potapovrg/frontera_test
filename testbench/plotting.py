@@ -220,3 +220,152 @@ def _add_title_page(pdf: PdfPages, meta: dict) -> None:
 def _wrap(text: str, width: int = 95) -> str:
     import textwrap
     return "\n".join(textwrap.wrap(text, width=width)) or "(none)"
+
+
+# ---------------------------------------------------------------- Auto Test
+
+_GREEN = "#1a7f37"
+
+
+def _draw_auto_level(ax, gen_freq, level, passed, expected_dbm: float, tol_db: float) -> None:
+    """Received level vs generator frequency with the tolerance band."""
+    gen_freq = np.asarray(gen_freq, float)
+    level = np.asarray(level, float)
+    passed = np.asarray(passed, bool)
+    lo_b, hi_b = expected_dbm - tol_db, expected_dbm + tol_db
+
+    ax.axhspan(lo_b, hi_b, color="#3fb950", alpha=0.18, label=f"Tolerance ±{tol_db:g} dB")
+    ax.axhline(expected_dbm, color="#57606a", linewidth=0.9, linestyle="--",
+               label=f"Expected {expected_dbm:.1f} dBm")
+    ax.plot(gen_freq, level, color="#1f6feb", linewidth=1.0, marker="o", markersize=3,
+            label="Measured level")
+
+    finite = np.isfinite(level)
+    bad = finite & ~passed
+    if np.any(bad):
+        ax.plot(gen_freq[bad], level[bad], linestyle="none", marker="o", markersize=6,
+                color="#da3633", zorder=5, label="Out of tolerance")
+
+    # y-limits: always include the band (and all finite data), with a margin.
+    vals = [lo_b, hi_b] + (list(level[finite]) if np.any(finite) else [])
+    lo, hi = min(vals), max(vals)
+    pad = 0.08 * (hi - lo) if hi > lo else 1.0
+    lo_y, hi_y = lo - pad, hi + pad
+    if np.any(~finite):
+        lo_y -= 0.06 * (hi_y - lo_y)   # room for the failure markers
+    ax.set_ylim(lo_y, hi_y)
+
+    nan = ~np.isfinite(level)
+    if np.any(nan):
+        y = lo_y + 0.03 * (hi_y - lo_y)
+        ax.plot(gen_freq[nan], np.full(int(nan.sum()), y), linestyle="none", marker="x",
+                markersize=7, color="#da3633", zorder=5, clip_on=False,
+                label="No measurement")
+
+    ax.set_xlabel("Generator frequency (MHz)")
+    ax.set_ylabel("Received level (dBm)")
+    ax.grid(True, linewidth=0.4, alpha=0.5)
+    ax.legend(loc="upper right", fontsize=8)
+
+
+def auto_png(cfg: Config, stamp: str, gen_freq, level, passed,
+             expected_dbm: float, tol_db: float, title: str) -> str:
+    """Render the Auto Test level plot to `{stamp}_AUTO.png` in cfg.plots_dir."""
+    fig, ax = plt.subplots(figsize=(10, 4.5), dpi=150, facecolor="white")
+    _draw_auto_level(ax, gen_freq, level, passed, expected_dbm, tol_db)
+    ax.set_title(title, fontsize=11)
+    fig.tight_layout()
+    name = f"{stamp}_AUTO.png"
+    fig.savefig(cfg.plots_dir / name, facecolor="white")
+    plt.close(fig)
+    return name
+
+
+def auto_pdf(cfg: Config, stamp: str, gen_freq, level, peak_freq, passed, meta: dict) -> str:
+    """Three-page Auto Test report: summary, level plot, frequency-error plot."""
+    gen_freq = np.asarray(gen_freq, float)
+    level = np.asarray(level, float)
+    peak_freq = np.asarray(peak_freq, float)
+    passed = np.asarray(passed, bool)
+    name = f"{stamp}_auto.pdf"
+    n_pass, n_fail = int(meta["n_pass"]), int(meta["n_fail"])
+    total = n_pass + n_fail
+    planned = int(meta.get("n_planned") or total)
+    # A run that was stopped or aborted proves nothing about the rest of the
+    # band: never call it PASS, and say where it ended.
+    complete = meta.get("run_state", "done") == "done" and total >= planned
+    ok = complete and n_fail == 0 and n_pass > 0
+
+    with PdfPages(cfg.reports_dir / name) as pdf:
+        fig = plt.figure(figsize=(10, 6.5), dpi=150, facecolor="white")
+        fig.text(0.5, 0.94, "Frontera Auto Test Report", fontsize=16, ha="center", weight="bold")
+        fig.text(0.08, 0.88, f"Generated: {meta['ts_utc']}", fontsize=10)
+
+        fig.text(0.08, 0.82, "Generator (Arinst SSA-TG R3)", fontsize=12, weight="bold",
+                 color="#1f6feb")
+        fig.text(0.08, 0.775,
+                 f"Start: {meta['start_a']:.1f} MHz   Stop: {meta['stop_a']:.1f} MHz   "
+                 f"Step: {meta['step_a']:.3f} MHz   Level: {meta['gen_level_dbm']:.1f} dBm",
+                 fontsize=10)
+
+        fig.text(0.08, 0.71, "Measurement", fontsize=12, weight="bold", color="#1f6feb")
+        fig.text(0.08, 0.665,
+                 f"Window: {meta['window_mhz']:.2f} MHz   "
+                 f"Analyzer step: {meta['analyzer_step_mhz']:.3f} MHz   "
+                 f"Cable loss: {meta['cable_loss_db']:.1f} dB", fontsize=10)
+        fig.text(0.08, 0.627,
+                 f"Expected level: {meta['expected_dbm']:.1f} dBm ± {meta['tolerance_db']:.1f} dB",
+                 fontsize=10)
+        fig.text(0.08, 0.592, f"Bench setup: {meta.get('setup_a', '-')}", fontsize=9,
+                 color="#57606a")
+
+        verdict = "PASS" if ok else ("FAIL" if complete or n_fail else "INCOMPLETE")
+        color = _GREEN if ok else ("#da3633" if verdict == "FAIL" else "#9a6700")
+        fig.text(0.08, 0.52, verdict, fontsize=28 if verdict != "INCOMPLETE" else 22,
+                 weight="bold", color=color, va="center")
+        fig.text(0.36 if verdict == "INCOMPLETE" else 0.25, 0.52,
+                 f"{n_pass} / {total} points within tolerance", fontsize=12, va="center")
+        if not complete:
+            last = f" at {gen_freq[-1]:.1f} MHz" if gen_freq.size else ""
+            why = meta.get("run_error") or meta.get("run_state", "stopped")
+            fig.text(0.08, 0.485,
+                     f"Run {meta.get('run_state', 'stopped')}{last}: {total} of {planned} "
+                     f"planned points measured ({_wrap(str(why), 70)})",
+                     fontsize=9, color="#9a6700", va="top")
+
+        fin = np.isfinite(level)
+        if np.any(fin):
+            dev = level - float(meta["expected_dbm"])
+            i = int(np.nanargmax(np.where(fin, np.abs(dev), -np.inf)))
+            stats = (f"Level min / max / mean: {np.nanmin(level):.1f} / {np.nanmax(level):.1f} / "
+                     f"{np.nanmean(level):.1f} dBm   Worst deviation: {dev[i]:+.2f} dB "
+                     f"@ {gen_freq[i]:.1f} MHz")
+        else:
+            stats = "Level statistics: no valid points"
+        fig.text(0.08, 0.45, stats, fontsize=9.5)
+
+        fig.text(0.08, 0.39, "Test conditions:", fontsize=10, weight="bold")
+        fig.text(0.08, 0.35, _wrap(meta.get("conditions_a", "")), fontsize=9, va="top")
+        pdf.savefig(fig, facecolor="white")
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(10, 4.5), dpi=150, facecolor="white")
+        _draw_auto_level(ax, gen_freq, level, passed, float(meta["expected_dbm"]),
+                         float(meta["tolerance_db"]))
+        ax.set_title("Received level vs generator frequency")
+        fig.tight_layout()
+        pdf.savefig(fig, facecolor="white")
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(10, 4.5), dpi=150, facecolor="white")
+        ax.plot(gen_freq, peak_freq - gen_freq, color="#8250df", linewidth=1.0,
+                marker="o", markersize=3)
+        ax.axhline(0.0, color="#57606a", linewidth=0.6, linestyle="--")
+        ax.set_xlabel("Generator frequency (MHz)")
+        ax.set_ylabel("Frequency error (MHz)")
+        ax.grid(True, linewidth=0.4, alpha=0.5)
+        ax.set_title("Peak frequency error (measured − generator)")
+        fig.tight_layout()
+        pdf.savefig(fig, facecolor="white")
+        plt.close(fig)
+    return name

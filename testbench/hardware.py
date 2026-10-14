@@ -11,6 +11,10 @@ nor a plain VID:PID scan can tell them apart. Two mechanisms cover that:
   port, or a bench that isn't the Pi: the shifter answers ``ping`` with the
   magic 0xAC1B3C55, a Frontera answers a ``scn20`` probe.
 
+The Arinst R3 generator (only used by the Auto Test page) is looked up before
+everything else, by USB product name — a list_ports scan with no serial I/O —
+and its port is excluded from both probes below so neither ever writes to it.
+
 The shifter is always resolved *first* so its port can be handed to
 ``find_sa6(exclude=...)`` — otherwise the SDR probe would fire scn20 at the
 STM32 (mirrors the exclude wiring in frontera_ml/services/detector.py:119).
@@ -23,6 +27,7 @@ from pathlib import Path
 
 from frontera_interface import find_sa6
 
+from .arinst_tg import find_arinst_tg
 from .switcher import DEFAULT_SYMLINK as SWITCHER_SYMLINK
 from .switcher import resolve_switcher_port
 
@@ -77,6 +82,7 @@ def resolve_topology(cfg) -> dict:
     Returns a dict the DeviceManager consumes and the UI renders::
 
         {"mode": str,
+         "generator": {"port": str|None, "source": str},
          "switcher": {"port": str|None, "source": str},
          "frontera1": {...}, "frontera2": {...},
          "warnings": [str, ...]}
@@ -87,6 +93,7 @@ def resolve_topology(cfg) -> dict:
     warnings: list = []
     result = {
         "mode": mode,
+        "generator": {"port": None, "source": "disabled"},
         "switcher": {"port": None, "source": "disabled"},
         "frontera1": {"port": None, "source": "disabled"},
         "frontera2": {"port": None, "source": "disabled"},
@@ -94,6 +101,9 @@ def resolve_topology(cfg) -> dict:
     }
 
     if cfg.mock:
+        # The generator is faked in every mode (the Auto Test page needs it
+        # regardless of topology); the Frontera units only as the mode uses them.
+        result["generator"] = {"port": "mock", "source": "mock"}
         # Only fake the units this mode actually uses, so the UI shows the same
         # shape it would with real hardware.
         if cfg.switcher_enabled():
@@ -108,11 +118,24 @@ def resolve_topology(cfg) -> dict:
 
     taken: list = []
 
-    # 1. shifter first, so its port is excluded from every scn20 probe below.
+    # 0. generator first: it is never probed by writing, so finding it is free,
+    # and claiming its port keeps the scn20 / ping probes off the R3. Not finding
+    # it is no warning — it only matters on the Auto Test page.
+    if cfg.generator_port:
+        gen_port, gen_source = cfg.generator_port, "explicit"
+    else:
+        gen_port = find_arinst_tg()
+        gen_source = "probe" if gen_port else "none"
+    result["generator"] = {"port": gen_port, "source": gen_source}
+    if gen_port:
+        taken.append(gen_port)
+
+    # 1. shifter next, so its port is excluded from every scn20 probe below.
     if cfg.switcher_enabled():
         port, source = resolve_switcher(cfg.switcher_port,
                                         exclude=[cfg.device_port, cfg.device_port2,
-                                                 FRONTERA1_SYMLINK, FRONTERA2_SYMLINK])
+                                                 FRONTERA1_SYMLINK, FRONTERA2_SYMLINK,
+                                                 *taken])
         result["switcher"] = {"port": port, "source": source}
         if port:
             taken.append(port)

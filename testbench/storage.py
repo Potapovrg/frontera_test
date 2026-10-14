@@ -35,6 +35,25 @@ def save_sweep(cfg: Config, block: str, stamp: str, sweep: SweepResult) -> str:
     return name
 
 
+def save_auto(cfg: Config, stamp: str, gen_freq, level, peak_freq, passed) -> str:
+    """Save an auto-test run as ``{stamp}_AUTO.npz`` under cfg.data_dir.
+
+    Layout: ``freq_mhz`` = generator frequencies and ``power_dbm`` = level the
+    Frontera measured at each, so the existing ``load_sweep`` reads it like any
+    sweep; plus ``peak_freq_mhz`` (where the Frontera actually saw the maximum
+    in each window) and ``passed`` (bool per step). Returns the filename.
+    """
+    name = f"{stamp}_AUTO.npz"
+    np.savez(
+        cfg.data_dir / name,
+        freq_mhz=np.asarray(gen_freq).astype(np.float32),
+        power_dbm=np.asarray(level).astype(np.float32),
+        peak_freq_mhz=np.asarray(peak_freq).astype(np.float32),
+        passed=np.asarray(passed).astype(bool),
+    )
+    return name
+
+
 def load_sweep(cfg: Config, filename: str) -> Tuple[np.ndarray, np.ndarray]:
     """Load a previously saved .npz sweep. Raises FileNotFoundError if missing."""
     fp = safe_path(cfg.data_dir, filename)

@@ -36,6 +36,7 @@ import numpy as np
 from frontera_interface import FronteraInterface, find_sa6
 
 from . import hardware
+from .arinst_tg import find_arinst_tg
 from .config import (
     DEV_MAX_MHZ,
     DEV_MIN_MHZ,
@@ -180,7 +181,11 @@ class _Analyzer:
         # and off the other Frontera.
         logger.warning("%s: could not open %s, probing for the device...",
                        self.name, self.port)
-        found = find_sa6(exclude=self.exclude)
+        # The R3 generator is looked up fresh (USB name, no serial I/O): it may
+        # have been plugged in after the topology was resolved, and scn20 must
+        # never be written to it.
+        gen = find_arinst_tg()
+        found = find_sa6(exclude=self.exclude + ((gen,) if gen else ()))
         if found and self._try_connect(dev, found):
             self.port = found
             self._dev = dev
@@ -278,6 +283,9 @@ class DeviceManager:
         self._topology: dict = {}
         self._unit_errors: dict = {}  # per-unit reason, for pass-level messages
         self.error: str | None = None
+        # (freq_mhz, dbm) of a simulated generator tone, set by the auto test's
+        # mock generator; only used under --mock.
+        self.mock_tone: tuple | None = None
         self._open()
 
     # -- lifecycle ----------------------------------------------------------
@@ -305,8 +313,10 @@ class DeviceManager:
                 logger.info("mock topology: %s", self.cfg.mode_label())
                 return
 
+            # "generator" is never opened here, but it must be in every exclude
+            # list so a reconnect probe never writes scn20/ping to the R3.
             ports = {k: (self._topology.get(k) or {}).get("port")
-                     for k in ("frontera1", "frontera2", "switcher")}
+                     for k in ("frontera1", "frontera2", "switcher", "generator")}
 
             if self.cfg.switcher_enabled():
                 if not ports["switcher"]:
@@ -364,9 +374,12 @@ class DeviceManager:
         with self._lock:
             topo = {k: dict(v) for k, v in self._topology.items()
                     if isinstance(v, dict)}
-            for key in ("frontera1", "frontera2", "switcher"):
+            for key in ("frontera1", "frontera2", "switcher", "generator"):
                 topo.setdefault(key, {"port": None, "source": "disabled"})
-                if self.cfg.mock:
+                if key == "generator":
+                    # opened per run by the auto test, never held by us
+                    topo[key]["open"] = topo[key].get("port") is not None
+                elif self.cfg.mock:
                     topo[key]["open"] = topo[key].get("port") is not None
                 elif key == "switcher":
                     topo[key]["open"] = self._switcher is not None
@@ -418,7 +431,11 @@ class DeviceManager:
                 )
 
         if self.cfg.mock:
-            freq, power = _mock_sweep(p.dev_start, p.dev_stop, step_mhz)
+            # the tone is in true frequency, the mock sweep in device space
+            tone = self.mock_tone
+            if tone is not None:
+                tone = (tone[0] - p.offset_mhz, tone[1])
+            freq, power = _mock_sweep(p.dev_start, p.dev_stop, step_mhz, tone=tone)
         else:
             analyzer = self._analyzers.get(p.analyzer)
             if analyzer is None:
@@ -501,12 +518,28 @@ def _stitch(segments: list) -> SweepResult:
     )
 
 
-def _mock_sweep(start_mhz: float, stop_mhz: float, step_mhz: float) -> tuple:
-    """Synthesize a plausible spectrum for UI/PDF testing without hardware."""
-    time.sleep(0.3)  # emulate acquisition latency
+def _mock_sweep(start_mhz: float, stop_mhz: float, step_mhz: float, tone=None) -> tuple:
+    """Synthesize a plausible spectrum for UI/PDF testing without hardware.
+
+    ``tone`` = ``(freq_mhz, dbm)`` in device space simulates a generator line:
+    the random peaks are replaced by one narrow peak so the auto test sees a
+    predictable level. Acquisition latency is short then, to keep mock runs fast.
+    """
+    time.sleep(0.3 if tone is None else 0.02)  # emulate acquisition latency
     freq = np.arange(start_mhz, stop_mhz + step_mhz / 2, step_mhz, dtype=np.float32)
     noise_floor = -108.0
     power = noise_floor + np.random.normal(0.0, 1.5, size=freq.size).astype(np.float32)
+
+    if tone is not None:
+        tone_f, tone_dbm = tone
+        if start_mhz <= tone_f <= stop_mhz and freq.size:
+            level = tone_dbm + float(np.random.normal(0.0, 1.0))
+            # gaussian skirt (~2 MHz) kept strictly below the peak bin
+            skirt = level - 3.0 - 40.0 * (1.0 - np.exp(-0.5 * ((freq - tone_f) / 2.0) ** 2))
+            power = np.maximum(power, skirt.astype(np.float32))
+            i = int(np.argmin(np.abs(freq - tone_f)))
+            power[i] = np.float32(level)
+        return freq, power
 
     rng = np.random.default_rng()
     for _ in range(rng.integers(2, 5)):

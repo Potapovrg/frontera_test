@@ -9,9 +9,22 @@ analyzer, attached to an OrangePi Zero 3 as `/dev/ttyACM0`.
   spectrum plot. Once both blocks have a result, **Generate PDF report** builds
   a white-background PDF with both spectra, an overlay, and a difference (B−A)
   plot.
+- **Auto Test** (`/auto`) — steps the Arinst SSA-TG R3 generator from start to
+  stop (default 1 MHz step, level −8…−29 dBm in 3 dB steps, default −14 dBm).
+  At each step the Frontera sweeps only a window of the given total width
+  (default 100 MHz) around the generator frequency; the level is the maximum in
+  the window, and the point passes if it is within ±tolerance of generator
+  level − cable loss. Live plot, Stop button, PDF report and a journal entry
+  with kind=auto. Other sweeps and bench changes are blocked while it runs.
 - **Test Journal** (`/journal`) — every generated report is logged to
   SQLite (`results/journal.db`) with the bench setup used for each block and
   links to the binary sweep data (`.npz`), plot PNGs, and the PDF.
+
+### Generator wiring
+
+R3 TG output -> Frontera RF input, through an attenuator/cable whose loss goes
+in "Cable loss". The R3 is found by its USB product name "Arinst SSA R3" (or
+`--generator-port`); it is excluded from the Frontera/shifter probes.
 
 ## Bench configurations (up to 12.2 GHz)
 
@@ -66,6 +79,8 @@ The panel warns when it had to fall back to probing with two Fronteras in play.
 python3 app.py --mock --port 8080
 ```
 
+Add `--generator-port /dev/ttyACMx` to pin the R3 instead of auto-detecting it.
+
 Open `http://localhost:8080/`.
 
 ## Run on the OrangePi (real device)
@@ -73,6 +88,7 @@ Open `http://localhost:8080/`.
 ```bash
 python3 app.py --port 8080                       # ports auto-resolved (symlink, then probe)
 python3 app.py --port 8080 --device-mode 2_device  # start in the two-device topology
+python3 app.py --port 8080 --generator-port /dev/ttyACM2  # pin the Arinst R3 generator
 ```
 
 Missing hardware is no longer fatal at startup — the server comes up and the
@@ -109,10 +125,13 @@ testbench/
   db.py                 JournalDB — thread-safe SQLite wrapper (comparisons table)
   storage.py             binary sweep persistence (.npz) + safe file-path helper
   plotting.py            matplotlib spectrum PNG + comparison PDF (white background)
+  autotest.py            Auto Test runner (generator stepping + windowed sweeps)
+  arinst_tg.py           Arinst SSA-TG R3 generator driver
   server.py              ThreadingHTTPServer routes
   pages.py               inline HTML/CSS/JS for both pages
 frontera_interface.py    vendored SA6/Frontera driver (see /home/test/frontera_ml for origin)
 tests/test_bands.py      band-plan / stitching unit tests (pytest, no hardware)
+tests/test_arinst_tg.py, test_autotest.py, test_auto_*.py   Auto Test driver, runner, page, plotting, server tests
 run_scan.py              simple one-shot scan CLI (smoke test)
 deploy.py                paramiko SFTP deploy + remote run/detach
 ```

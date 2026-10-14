@@ -25,7 +25,10 @@ CREATE TABLE IF NOT EXISTS comparisons (
     pdf_path     TEXT,
     device_mode_a TEXT, device_mode_b TEXT,
     bands_a       TEXT, bands_b       TEXT,
-    kind          TEXT DEFAULT 'comparison'
+    kind          TEXT DEFAULT 'comparison',
+    gen_level_dbm REAL, window_mhz REAL, tolerance_db REAL,
+    n_pass        INTEGER, n_fail INTEGER,
+    run_state     TEXT
 );
 """
 
@@ -37,7 +40,15 @@ _ADDED_COLUMNS = {
     "device_mode_b": "TEXT",
     "bands_a": "TEXT",   # JSON: [{"label","start","stop","offset"}, ...]
     "bands_b": "TEXT",
-    "kind": "TEXT DEFAULT 'comparison'",   # 'comparison' | 'single' (single fills only the _a fields)
+    # 'comparison' | 'single' | 'auto'; single fills only the _a fields, auto fills
+    # them with the generator sweep (generator freqs vs measured level)
+    "kind": "TEXT DEFAULT 'comparison'",
+    "gen_level_dbm": "REAL",
+    "window_mhz": "REAL",
+    "tolerance_db": "REAL",
+    "n_pass": "INTEGER",
+    "n_fail": "INTEGER",
+    "run_state": "TEXT",   # auto only: done | stopped | error (+ n of planned in n_points_a)
 }
 
 

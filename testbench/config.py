@@ -51,6 +51,8 @@ class Config:
     switcher_port: str = ""     # blank -> /dev/switcher, else ping-probe
     offset2_mhz: float = 6000.0  # added to the shifted device's measured freqs
     switcher_settle_ms: int = 100  # MAX2870 relock wait after a real toggle
+    generator_port: str = ""    # Arinst SSA-TG R3; blank -> auto-detect by USB product name
+    generator_settle_ms: int = 20  # wait after retuning the generator before measuring
 
     results_dir: Path = field(default_factory=lambda: Path("results"))
 

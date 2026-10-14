@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from . import pages, plotting, storage
+from .autotest import AutoTestRunner
 from .config import DEVICE_MODES, Config
 from .db import JournalDB
 from .device import DeviceError, DeviceManager
@@ -18,7 +20,12 @@ from .device import DeviceError, DeviceManager
 logger = logging.getLogger(__name__)
 
 
-def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
+_BLOCKED_DURING_AUTO = frozenset(
+    {"/api/sweep", "/api/hardware/mode", "/api/hardware/probe", "/api/switcher"})
+
+
+def make_handler(cfg: Config, device: DeviceManager, db: JournalDB,
+                 autotest: AutoTestRunner):
     # In-memory "last sweep per block" — cleared to a fresh comparison whenever
     # both blocks have been re-run. Guarded by state_lock since each HTTP
     # request runs on its own thread.
@@ -71,6 +78,14 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 self._send(200, pages.comparison_page(cfg))
             elif path == "/single":
                 self._send(200, pages.single_page(cfg))
+            elif path == "/auto":
+                self._send(200, pages.auto_page(cfg))
+            elif path == "/api/auto/status":
+                try:
+                    since = int(parse_qs(urlsplit(self.path).query).get("since", ["0"])[0])
+                except (ValueError, TypeError):
+                    since = 0
+                self._send_json(200, autotest.status(max(since, 0)))
             elif path == "/journal":
                 self._send(200, pages.journal_page())
             elif path == "/api/journal":
@@ -99,6 +114,10 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
             # Same urlsplit as _route_get — a query string on a POST would
             # otherwise miss every route and 404.
             path = urlsplit(self.path).path
+            # These would measure the generator signal or reopen ports mid-run.
+            if path in _BLOCKED_DURING_AUTO and autotest.running:
+                self._send_json(409, {"error": "auto test running \u2014 stop it first"})
+                return
             if path == "/api/sweep":
                 self._handle_sweep()
             elif path == "/api/report":
@@ -113,6 +132,12 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
                 self._handle_probe()
             elif path == "/api/switcher":
                 self._handle_switcher()
+            elif path == "/api/auto/start":
+                self._handle_auto_start()
+            elif path == "/api/auto/stop":
+                self._send_json(200, autotest.stop())
+            elif path == "/api/auto/report":
+                self._handle_auto_report()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -285,6 +310,65 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
             comparison_id = db.insert(dict(record, pdf_path=pdf_name))
             self._send_json(200, {"pdf_url": f"/report/{pdf_name}", "comparison_id": comparison_id})
 
+        def _handle_auto_start(self):
+            try:
+                body = self._read_json()
+                if not isinstance(body, dict):
+                    raise ValueError("body must be a JSON object")
+                status = autotest.start(body)
+            except ValueError as exc:  # includes json.JSONDecodeError
+                self._send_json(400, {"error": f"bad request: {exc}"})
+                return
+            except RuntimeError as exc:
+                code = 409 if "already running" in str(exc) else 502
+                self._send_json(code, {"error": str(exc)})
+                return
+            self._send_json(200, status)
+
+        def _handle_auto_report(self):
+            if autotest.running:
+                self._send_json(409, {"error": "auto test running \u2014 stop it first"})
+                return
+            res = autotest.result()
+            if res is None:
+                self._send_json(400, {"error": "run the auto test first"})
+                return
+
+            p = res["params"]
+            level = [float(x) for x in res["level"]]
+            gen_freq = [float(x) for x in res["gen_freq"]]
+            expected = float(p.expected_dbm)
+            worst = None
+            for i, lv in enumerate(level):
+                if math.isfinite(lv) and (
+                        worst is None or abs(lv - expected) > abs(level[worst] - expected)):
+                    worst = i
+            record = {
+                "ts_utc": storage.utc_now_str(), "kind": "auto",
+                "start_a": float(p.start), "stop_a": float(p.stop), "step_a": float(p.step),
+                "conditions_a": p.conditions,
+                "npy_a": res["npz"], "png_a": res["png"],
+                "n_points_a": len(level),
+                "device_mode_a": res["device_mode"],
+                "gen_level_dbm": float(p.level_dbm),
+                "window_mhz": float(p.window),
+                "tolerance_db": float(p.tolerance),
+                "n_pass": int(res["n_pass"]), "n_fail": int(res["n_fail"]),
+                "run_state": res["state"],
+                "peak_dbm_a": level[worst] if worst is not None else None,
+                "peak_freq_a": gen_freq[worst] if worst is not None else None,
+                "bands_a": json.dumps([]),
+            }
+            meta = dict(record, analyzer_step_mhz=float(p.analyzer_step),
+                        cable_loss_db=float(p.cable_loss), expected_dbm=expected,
+                        setup_a=res["setup"], n_planned=int(res["n_planned"]),
+                        run_error=res["error"])
+            pdf_name = plotting.auto_pdf(
+                cfg, storage.make_stamp(), res["gen_freq"], res["level"],
+                res["peak_freq"], res["passed"], meta)
+            comparison_id = db.insert(dict(record, pdf_path=pdf_name))
+            self._send_json(200, {"pdf_url": f"/report/{pdf_name}", "comparison_id": comparison_id})
+
         def _handle_journal_delete(self):
             body = self._read_json()
             try:
@@ -306,7 +390,11 @@ def make_handler(cfg: Config, device: DeviceManager, db: JournalDB):
     return Handler
 
 
-def serve(cfg: Config, device: DeviceManager, db: JournalDB) -> ThreadingHTTPServer:
-    httpd = ThreadingHTTPServer((cfg.http_host, cfg.http_port), make_handler(cfg, device, db))
+def serve(cfg: Config, device: DeviceManager, db: JournalDB,
+          autotest: AutoTestRunner | None = None) -> ThreadingHTTPServer:
+    if autotest is None:
+        autotest = AutoTestRunner(cfg, device)
+    httpd = ThreadingHTTPServer((cfg.http_host, cfg.http_port),
+                                make_handler(cfg, device, db, autotest))
     logger.info("test bench server on http://%s:%d", cfg.http_host, cfg.http_port)
     return httpd

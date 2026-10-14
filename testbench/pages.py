@@ -20,6 +20,7 @@ a{color:#58a6ff}
 .block{border:1px solid #30363d;border-radius:6px;padding:14px;margin-bottom:18px;background:#161b22}
 .block.a h2{color:#1f6feb}
 .block.b h2{color:#da3633}
+.block.auto h2{color:#3fb950}
 label{display:inline-block;min-width:80px;font-size:13px;color:#8b949e}
 input[type=number]{width:90px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;
   border-radius:4px;padding:3px 6px;margin:4px 8px 4px 0}
@@ -48,14 +49,14 @@ select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4
 button.ghost{background:#21262d;border:1px solid #30363d;color:#c9d1d9;margin-right:6px}
 button.small{padding:3px 10px;font-size:12px;margin-right:6px}
 .ports{font-size:12px;color:#8b949e;margin:8px 0 2px 0;line-height:1.7}
-.ports .unit{display:inline-block;min-width:92px;color:#c9d1d9}
+.ports .unit{display:inline-block;min-width:92px;padding-right:8px;color:#c9d1d9}
 .ports .src{color:#6e7681}
 .ok{color:#3fb950}
 .bad{color:#f85149}
 .warn{color:#d29922;font-size:12px;margin-top:6px;white-space:pre-wrap}
 """
 
-_NAV = """<nav><a href="/">Comparison Test</a><a href="/single">Single Test</a><a href="/journal">Test Journal</a></nav>"""
+_NAV = """<nav><a href="/">Comparison Test</a><a href="/single">Single Test</a><a href="/auto">Auto Test</a><a href="/journal">Test Journal</a></nav>"""
 
 
 _HARDWARE_HTML = """
@@ -120,36 +121,14 @@ async function errorText(r){
 }
 """
 
-_SCRIPT = """
-<script>
-""" + _COMMON_JS + """
-const BLOCKS = __BLOCKS__;
-const SINGLE = __SINGLE__;
-const REPORT_URL = '__REPORT_URL__';
-const state = {};
-for (const b of BLOCKS) state[b] = {edited:false, done:false};
+_HARDWARE_JS = """
 let HW = null;   // latest /api/hardware payload
-
-function todayStr(){
-  const d = new Date();
-  const pad = n => String(n).padStart(2, '0');
-  return `${pad(d.getUTCDate())}.${pad(d.getUTCMonth()+1)}.${d.getUTCFullYear()} ` +
-         `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
-}
-
-function defaultConditions(block){
-  const start = document.getElementById(block+'_start').value;
-  const stop  = document.getElementById(block+'_stop').value;
-  const step  = document.getElementById(block+'_step').value;
-  const setup = HW ? `; bench: ${HW.mode_label}` : '';
-  return `${todayStr()}; Sweep ${start}-${stop} MHz, step ${step} MHz${setup}`;
-}
-
 // -- hardware panel ---------------------------------------------------------
 // Seeded with the value the stop inputs are rendered with, so the very first
 // render can already retune it if the bench started in a 12 GHz mode.
 let lastMax = __DEFAULT_STOP__;
-const UNIT_NAMES = {frontera1:'Frontera 1', frontera2:'Frontera 2', switcher:'Shifter'};
+const UNIT_NAMES = {frontera1:'Frontera 1', frontera2:'Frontera 2', switcher:'Shifter',
+                    generator:'Generator (Arinst TG R3)'};
 const SOURCE_NAMES = {explicit:'set manually', symlink:'udev symlink', probe:'auto-probe',
                       mock:'mock', none:'not found', disabled:'not used'};
 
@@ -166,8 +145,11 @@ function renderHardware(){
   sel.value = HW.mode;
 
   const lines = [];
-  for (const key of ['frontera1','frontera2','switcher']){
-    const p = HW.ports[key] || {};
+  const keys = ['frontera1','frontera2','switcher'];
+  if (SHOW_GENERATOR) keys.push('generator');
+  for (const key of keys){
+    const p = (HW.ports && HW.ports[key]) || (key === 'generator' ? null : {});
+    if (!p) continue;
     if (p.source === 'disabled') continue;
     const ok = !!p.port;
     lines.push(`<div><span class="unit">${UNIT_NAMES[key]}</span>` +
@@ -186,18 +168,7 @@ function renderHardware(){
 
   document.getElementById('sw_panel').style.display = HW.switcher_enabled ? '' : 'none';
 
-  // Retune the frequency inputs to what this topology can actually reach.
-  // The stop value follows the ceiling only while it still sits on the
-  // previous ceiling — i.e. the operator hasn't typed their own span — so
-  // switching to a 12 GHz setup gives a 12 GHz sweep without clobbering a
-  // deliberately narrowed range. Above the new ceiling it is always clamped.
-  for (const block of BLOCKS){
-    const stopEl = document.getElementById(block+'_stop');
-    const value = parseFloat(stopEl.value);
-    stopEl.max = HW.max_stop_mhz;
-    if (value === lastMax || value > HW.max_stop_mhz) stopEl.value = HW.max_stop_mhz;
-    refreshDefault(block);
-  }
+  onHardware(HW);
   lastMax = HW.max_stop_mhz;
 }
 
@@ -256,7 +227,49 @@ for (const btn of document.querySelectorAll('#sw_panel button[data-sw]')){
 }
 
 loadHardware();
+"""
 
+_SCRIPT = """
+<script>
+""" + _COMMON_JS + """
+const BLOCKS = __BLOCKS__;
+const SINGLE = __SINGLE__;
+const REPORT_URL = '__REPORT_URL__';
+const SHOW_GENERATOR = false;
+const state = {};
+for (const b of BLOCKS) state[b] = {edited:false, done:false};
+
+function todayStr(){
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getUTCDate())}.${pad(d.getUTCMonth()+1)}.${d.getUTCFullYear()} ` +
+         `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
+}
+
+function defaultConditions(block){
+  const start = document.getElementById(block+'_start').value;
+  const stop  = document.getElementById(block+'_stop').value;
+  const step  = document.getElementById(block+'_step').value;
+  const setup = HW ? `; bench: ${HW.mode_label}` : '';
+  return `${todayStr()}; Sweep ${start}-${stop} MHz, step ${step} MHz${setup}`;
+}
+
+function onHardware(hw){
+  // Retune the frequency inputs to what this topology can actually reach.
+  // The stop value follows the ceiling only while it still sits on the
+  // previous ceiling — i.e. the operator hasn't typed their own span — so
+  // switching to a 12 GHz setup gives a 12 GHz sweep without clobbering a
+  // deliberately narrowed range. Above the new ceiling it is always clamped.
+  for (const block of BLOCKS){
+    const stopEl = document.getElementById(block+'_stop');
+    const value = parseFloat(stopEl.value);
+    stopEl.max = hw.max_stop_mhz;
+    if (value === lastMax || value > hw.max_stop_mhz) stopEl.value = hw.max_stop_mhz;
+    refreshDefault(block);
+  }
+}
+
+""" + _HARDWARE_JS + """
 function refreshDefault(block){
   if (state[block].edited) return;
   document.getElementById(block+'_conditions').value = defaultConditions(block);
@@ -326,7 +339,6 @@ document.getElementById('report_btn').addEventListener('click', async () => {
 </script>
 """
 
-
 def _script(cfg, blocks: str, single: bool, report_url: str) -> str:
     # The default stop doubles as "the operator hasn't customised this yet",
     # which is what lets a mode switch retune it (see _SCRIPT's lastMax).
@@ -366,6 +378,387 @@ def comparison_page(cfg) -> str:
 {script}
 </body></html>"""
 
+_AUTO_HTML = """
+<div class="block auto" id="block_auto">
+  <h2>Generator sweep — Arinst TG R3 → Frontera</h2>
+  <div class="row">
+    <label>Generator</label>
+    <label style="min-width:0">Start (MHz)</label>
+    <input type=number step=any id="auto_start" value={start:g} class=param>
+    <label style="min-width:0">Stop (MHz)</label>
+    <input type=number step=any id="auto_stopf" value={stop:g} class=param>
+    <label style="min-width:0">Step (MHz)</label>
+    <input type=number step=any id="auto_step" value=1 class=param>
+    <label style="min-width:0">Level (dBm)</label>
+    <select id="auto_level" class=param style="min-width:0">
+      <option value="-8">-8</option><option value="-11">-11</option>
+      <option value="-14" selected>-14</option><option value="-17">-17</option>
+      <option value="-20">-20</option><option value="-23">-23</option>
+      <option value="-26">-26</option><option value="-29">-29</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>Measurement</label>
+    <label style="min-width:0">Window (MHz)</label>
+    <input type=number step=any id="auto_window" value=100 class=param
+      title="total width of the Frontera sweep centred on the generator frequency">
+    <label style="min-width:0">Analyzer step (MHz)</label>
+    <input type=number step=any id="auto_astep" value={astep:g} class=param>
+  </div>
+  <div class="row">
+    <label>Check</label>
+    <label style="min-width:0">Cable loss (dB)</label>
+    <input type=number step=any id="auto_loss" value=0 class=param>
+    <label style="min-width:0">Tolerance (± dB)</label>
+    <input type=number step=any id="auto_tol" value=3 class=param>
+    <span id="auto_expected" class="status" style="display:inline-block"></span>
+  </div>
+  <div class="row">
+    <label style="vertical-align:top">Conditions</label>
+    <textarea id="auto_conditions"></textarea>
+  </div>
+  <button id="auto_run">Start auto test</button>
+  <button id="auto_stop" class="danger" disabled>Stop</button>
+  <div class="status" id="auto_status"></div>
+  <canvas id="auto_canvas" style="width:100%;height:360px;background:#fff;border:1px solid #30363d;border-radius:4px;margin-top:10px"></canvas>
+  <img class="spectrum" id="auto_img" style="display:none">
+</div>
+"""
+
+_AUTO_PRE_JS = """
+const SHOW_GENERATOR = true;
+const GEN_MAX_MHZ = 12000;
+const REPORT_URL = '/api/auto/report';
+"""
+
+_AUTO_JS = """
+const $ = id => document.getElementById(id);
+const PARAM_IDS = ['auto_start','auto_stopf','auto_step','auto_level','auto_window',
+                   'auto_astep','auto_loss','auto_tol'];
+let condEdited = false;
+let points = [];        // accumulated {f, level, peak_f, pass}
+let nextIdx = 0;
+let last = null;        // last status payload
+let pollTimer = null;
+let wasRunning = false;
+let runId = null;       // server run_id the accumulated points belong to
+let polling = false;    // one status request at a time, or points get appended twice
+
+function todayStr(){
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getUTCDate())}.${pad(d.getUTCMonth()+1)}.${d.getUTCFullYear()} ` +
+         `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
+}
+const num = id => parseFloat($(id).value);
+const fmt = (v, d) => (v < 0 ? '\\u2212' : '') + Math.abs(v).toFixed(d);
+
+function expectedNow(){ return num('auto_level') - num('auto_loss'); }
+
+function refreshExpected(){
+  const e = expectedNow(), t = num('auto_tol');
+  $('auto_expected').textContent = (isFinite(e) && isFinite(t))
+    ? `expected ${fmt(e,1)} dBm \\u00b1 ${t.toFixed(1)} dB` : '';
+}
+
+function defaultConditions(){
+  const setup = HW ? `; bench: ${HW.mode_label}` : '';
+  return `${todayStr()}; Gen ${$('auto_start').value}-${$('auto_stopf').value} MHz ` +
+    `step ${$('auto_step').value} MHz @ ${$('auto_level').value} dBm; ` +
+    `window ${$('auto_window').value} MHz; tol \\u00b1${$('auto_tol').value} dB${setup}`;
+}
+
+function refreshDefault(){
+  if (!condEdited) $('auto_conditions').value = defaultConditions();
+}
+
+function onHardware(hw){
+  // Same retune logic as the block pages, capped at the generator's maximum.
+  const stopEl = $('auto_stopf');
+  const cap = Math.min(hw.max_stop_mhz, GEN_MAX_MHZ);
+  const value = parseFloat(stopEl.value);
+  stopEl.max = cap;
+  if (value === Math.min(lastMax, GEN_MAX_MHZ) || value > cap) stopEl.value = cap;
+  refreshDefault();
+}
+
+$('auto_conditions').addEventListener('input', () => { condEdited = true; });
+for (const id of PARAM_IDS){
+  $(id).addEventListener('input', () => { refreshExpected(); refreshDefault(); redraw(); });
+  $(id).addEventListener('change', () => { refreshExpected(); refreshDefault(); redraw(); });
+}
+refreshExpected();
+refreshDefault();
+
+// -- running state / locking ---------------------------------------------------
+function isRunning(){ return !!last && last.state === 'running'; }
+
+function applyLock(){
+  const run = isRunning();
+  for (const id of PARAM_IDS) $(id).disabled = run;
+  $('auto_conditions').disabled = run;
+  $('auto_run').disabled = run;
+  $('auto_stop').disabled = !run;
+  $('hw_mode').disabled = run;
+  $('hw_probe').disabled = run;
+  for (const b of document.querySelectorAll('#sw_panel button[data-sw]')) b.disabled = run;
+  const st = last ? last.state : 'idle';
+  $('report_btn').disabled = !((st === 'done' || st === 'stopped' || st === 'error') && points.length > 0);
+}
+
+function showStatus(){
+  const el = $('auto_status');
+  if (!last || last.state === 'idle'){ el.textContent = ''; return; }
+  const s = last.summary || {};
+  const counts = `pass ${s.n_pass ?? 0}, fail ${s.n_fail ?? 0}`;
+  const pct = last.n ? (100 * last.i / last.n).toFixed(1) : '0.0';
+  const stats = (s.min != null && s.max != null && s.mean != null)
+    ? `; min ${fmt(s.min,1)} / max ${fmt(s.max,1)} / mean ${fmt(s.mean,1)} dBm` : '';
+  if (last.state === 'running'){
+    const eta = last.eta_s == null ? '?' : Math.max(1, Math.round(last.eta_s / 60));
+    el.textContent = `Running ${last.i}/${last.n} (${pct}%), ETA ${eta} min \\u2014 ${counts}`;
+  } else if (last.state === 'done'){
+    el.textContent = `Done: ${last.i}/${last.n} points \\u2014 ${counts}${stats}`;
+  } else if (last.state === 'stopped'){
+    el.textContent = `Stopped: ${last.i}/${last.n} points \\u2014 ${counts}${stats}`;
+  } else if (last.state === 'error'){
+    el.textContent = `ERROR: ${last.error || 'unknown'} (${last.i}/${last.n} points, ${counts})`;
+  }
+}
+
+// -- plot ----------------------------------------------------------------------
+function niceStep(range, target){
+  const raw = range / target;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const r = raw / mag;
+  return (r < 1.5 ? 1 : r < 3 ? 2 : r < 7 ? 5 : 10) * mag;
+}
+
+function redraw(){
+  const cv = $('auto_canvas');
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+
+  const p = (last && last.params) || null;
+  const x0 = p ? p.start : num('auto_start'), x1 = p ? p.stop : num('auto_stopf');
+  let exp = last && last.expected_dbm != null ? last.expected_dbm : expectedNow();
+  let tol = last && last.tolerance_db != null ? last.tolerance_db : num('auto_tol');
+  if (!isFinite(exp)) exp = -14;
+  if (!isFinite(tol)) tol = 3;
+  let ymin = exp - tol, ymax = exp + tol;
+  for (const pt of points){
+    if (pt.level != null && isFinite(pt.level)){
+      ymin = Math.min(ymin, pt.level); ymax = Math.max(ymax, pt.level);
+    }
+  }
+  const pad = Math.max((ymax - ymin) * 0.08, 1);
+  ymin -= pad; ymax += pad;
+  const L = 56, R = 12, T = 12, B = 36;
+  const pw = W - L - R, ph = H - T - B;
+  const xr = (x1 > x0) ? (x1 - x0) : 1;
+  const X = f => L + (f - x0) / xr * pw;
+  const Y = v => T + (ymax - v) / (ymax - ymin) * ph;
+
+  // tolerance band + expected line
+  g.fillStyle = 'rgba(63,185,80,0.18)';
+  g.fillRect(L, Y(exp + tol), pw, Y(exp - tol) - Y(exp + tol));
+  g.strokeStyle = '#2da44e'; g.lineWidth = 1; g.setLineDash([6, 4]);
+  g.beginPath(); g.moveTo(L, Y(exp)); g.lineTo(L + pw, Y(exp)); g.stroke();
+  g.setLineDash([]);
+
+  // axes, ticks, labels
+  g.strokeStyle = '#888'; g.fillStyle = '#333'; g.font = '11px monospace';
+  g.strokeRect(L, T, pw, ph);
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  const xs = niceStep(xr, 8);
+  for (let v = Math.ceil(x0 / xs) * xs; v <= x1 + 1e-9; v += xs){
+    g.strokeStyle = '#e4e4e4'; g.beginPath(); g.moveTo(X(v), T); g.lineTo(X(v), T + ph); g.stroke();
+    g.fillText(String(+v.toPrecision(7)), X(v), T + ph + 4);
+  }
+  g.textAlign = 'right'; g.textBaseline = 'middle';
+  const ys = niceStep(ymax - ymin, 6);
+  for (let v = Math.ceil(ymin / ys) * ys; v <= ymax + 1e-9; v += ys){
+    g.strokeStyle = '#e4e4e4'; g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(L + pw, Y(v)); g.stroke();
+    g.fillText(String(+v.toPrecision(6)), L - 5, Y(v));
+  }
+  g.textAlign = 'center'; g.textBaseline = 'bottom';
+  g.fillText('Generator frequency, MHz', L + pw / 2, H - 2);
+  g.save(); g.translate(12, T + ph / 2); g.rotate(-Math.PI / 2);
+  g.textBaseline = 'top'; g.fillText('Level, dBm', 0, 0); g.restore();
+
+  // trace (break at missing values)
+  g.strokeStyle = '#1f6feb'; g.lineWidth = 1.2; g.beginPath();
+  let pen = false;
+  for (const pt of points){
+    if (pt.level == null || !isFinite(pt.level)){ pen = false; continue; }
+    if (pen) g.lineTo(X(pt.f), Y(pt.level)); else { g.moveTo(X(pt.f), Y(pt.level)); pen = true; }
+  }
+  g.stroke();
+  // failures
+  for (const pt of points){
+    if (pt.level != null && isFinite(pt.level)){
+      if (!pt.pass){
+        g.fillStyle = '#da3633'; g.beginPath(); g.arc(X(pt.f), Y(pt.level), 3, 0, 2 * Math.PI); g.fill();
+      }
+    } else {
+      const x = X(pt.f), y = T + ph - 6;
+      g.strokeStyle = '#da3633'; g.lineWidth = 1.5; g.beginPath();
+      g.moveTo(x - 3, y - 3); g.lineTo(x + 3, y + 3); g.moveTo(x + 3, y - 3); g.lineTo(x - 3, y + 3);
+      g.stroke();
+    }
+  }
+}
+window.addEventListener('resize', redraw);
+
+// -- server polling ------------------------------------------------------------
+function restoreParams(p){
+  if (!p) return;
+  const set = (id, v) => { if (v != null) $(id).value = v; };
+  set('auto_start', p.start); set('auto_stopf', p.stop); set('auto_step', p.step);
+  set('auto_level', p.level_dbm); set('auto_window', p.window);
+  set('auto_astep', p.analyzer_step); set('auto_loss', p.cable_loss); set('auto_tol', p.tolerance);
+  if (p.conditions != null){ $('auto_conditions').value = p.conditions; condEdited = true; }
+  refreshExpected();
+}
+
+function showPng(){
+  const img = $('auto_img');
+  if (last && last.png_url && ['done', 'stopped', 'error'].includes(last.state)){
+    img.src = last.png_url + '?t=' + Date.now();
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+
+function schedule(){
+  clearTimeout(pollTimer);
+  if (isRunning()) pollTimer = setTimeout(() => poll(), 1000);
+}
+
+async function poll(first){
+  if (polling) return;
+  polling = true;
+  try { await pollOnce(first); } finally { polling = false; }
+}
+
+async function pollOnce(first){
+  let since = nextIdx;
+  for (let attempt = 0; attempt < 2; attempt++){
+    let j;
+    try {
+      const r = await fetch('/api/auto/status?since=' + since);
+      if (!r.ok) throw new Error(await errorText(r));
+      j = await r.json();
+    } catch(e) {
+      if (isRunning()) schedule();   // transient: keep trying
+      else $('auto_status').textContent = 'ERROR: ' + e.message;
+      return;
+    }
+    // A new run replaced ours: start over from the first point.
+    if (since > 0 && (j.run_id !== runId || j.next < points.length || (j.n && points.length > j.n))){
+      points = []; nextIdx = 0; since = 0;
+      continue;
+    }
+    if (first) restoreParams(j.params);
+    runId = j.run_id;
+    for (const pt of (j.points || [])) points.push(pt);
+    nextIdx = j.next;
+    const prevRunning = wasRunning;
+    last = j;
+    wasRunning = j.state === 'running';
+    showStatus(); applyLock(); redraw();
+    if (prevRunning && !wasRunning) showPng();
+    else if (first) showPng();
+    schedule();
+    return;
+  }
+}
+
+$('auto_run').addEventListener('click', async () => {
+  $('auto_run').disabled = true;
+  $('auto_status').textContent = 'Starting...';
+  try {
+    const body = {
+      start: num('auto_start'), stop: num('auto_stopf'), step: num('auto_step'),
+      level_dbm: parseFloat($('auto_level').value), window: num('auto_window'),
+      analyzer_step: num('auto_astep'), cable_loss: num('auto_loss'), tolerance: num('auto_tol'),
+      conditions: $('auto_conditions').value,
+    };
+    const r = await fetch('/api/auto/start', {method:'POST', body: JSON.stringify(body)});
+    if (!r.ok) throw new Error(await errorText(r));
+    const j = await r.json();
+    points = []; nextIdx = 0; runId = j.run_id;
+    $('auto_img').style.display = 'none';
+    $('report_status').textContent = '';
+    last = j; wasRunning = j.state === 'running';
+    restoreParams(j.params);
+    showStatus(); applyLock(); redraw();
+    // pick up points from index 0 right away
+    await poll();
+  } catch(e) {
+    $('auto_status').textContent = 'ERROR: ' + e.message;
+    applyLock();
+  }
+});
+
+$('auto_stop').addEventListener('click', async () => {
+  $('auto_stop').disabled = true;
+  try {
+    const r = await fetch('/api/auto/stop', {method:'POST', body: '{}'});
+    if (!r.ok) throw new Error(await errorText(r));
+    await poll();
+  } catch(e) {
+    $('auto_status').textContent = 'ERROR: ' + e.message;
+  }
+});
+
+$('report_btn').addEventListener('click', async () => {
+  const statusEl = $('report_status');
+  const btn = $('report_btn');
+  btn.disabled = true;
+  statusEl.textContent = 'Generating PDF...';
+  try {
+    const r = await fetch(REPORT_URL, {method:'POST'});
+    if (!r.ok) throw new Error(await errorText(r));
+    const j = await r.json();
+    statusEl.innerHTML = `Report ready: <a href="${j.pdf_url}" target=_blank>open PDF</a> ` +
+      `(journal entry #${j.comparison_id}, see <a href="/journal">Test Journal</a>)`;
+  } catch(e) {
+    statusEl.textContent = 'ERROR: ' + e.message;
+  } finally {
+    applyLock();
+  }
+});
+
+poll(true);
+"""
+
+
+def auto_page(cfg) -> str:
+    script = ("<script>" + _COMMON_JS + _AUTO_PRE_JS + _HARDWARE_JS + _AUTO_JS + "</script>")
+    script = script.replace("__DEFAULT_STOP__", f"{min(cfg.default_stop_mhz, 12000):g}")
+    block = (_AUTO_HTML.replace("{start:g}", f"{cfg.default_start_mhz:g}")
+             .replace("{stop:g}", f"{cfg.default_stop_mhz:g}")
+             .replace("{astep:g}", f"{cfg.default_step_mhz:g}"))
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<title>Frontera — Auto Test</title>
+<style>{_STYLE}</style></head><body>
+{_NAV}
+<h1>Auto Test</h1>
+{_HARDWARE_HTML}
+{block}
+<button class="report" id="report_btn" disabled>Generate PDF report</button>
+<div class="status" id="report_status"></div>
+{script}
+</body></html>"""
+
+
 
 _JOURNAL_SCRIPT = """
 <script>
@@ -390,15 +783,32 @@ async function poll(){
       const aData = c.npy_a ? `<a href="/data/${c.npy_a}">A bin</a>` : '';
       const bData = c.npy_b ? `<a href="/data/${c.npy_b}">B bin</a>` : '';
       const setup = (m) => escapeHtml(MODE_LABELS[m] || m || '—');
-      const single = c.kind === 'single';
+      const auto = c.kind === 'auto';
+      const single = c.kind === 'single' || auto;
+      const timeNote = auto ? '<div class=cond>auto</div>' : (single ? '<div class=cond>single</div>' : '');
+      const blockA = auto
+        ? `${c.start_a}-${c.stop_a}/${c.step_a}` +
+          `<div class=cond>@ ${c.gen_level_dbm} dBm, window ${c.window_mhz} MHz, \u00b1${c.tolerance_db} dB</div>` +
+          `<div class=cond>${setup(c.device_mode_a)}</div>` +
+          `<div class=cond>${escapeHtml(c.conditions_a)}</div>`
+        : `${c.start_a}-${c.stop_a}/${c.step_a}<div class=cond>${setup(c.device_mode_a)}</div>` +
+          `<div class=cond>${escapeHtml(c.conditions_a)}</div>`;
+      // A stopped/aborted run is never shown green: it says nothing about the
+      // part of the band it did not reach.
+      const incomplete = auto && c.run_state && c.run_state !== 'done';
+      const blockB = auto
+        ? `<span class="${c.n_fail == 0 && !incomplete ? 'ok' : 'bad'}">pass ${c.n_pass} / fail ${c.n_fail}</span>` +
+          (incomplete ? `<div class=cond>${escapeHtml(c.run_state)} after ${c.n_pass + c.n_fail} points</div>` : '')
+        : '';
+      const peakA = `${c.peak_dbm_a?.toFixed?.(1) ?? ''} @ ${c.peak_freq_a?.toFixed?.(1) ?? ''}` +
+        (auto ? '<div class=cond>worst</div>' : '');
       tr.innerHTML = `<td class=chk><input type=checkbox class=rowchk value="${c.id}"></td>` +
-        `<td>${c.id}</td><td>${c.ts_utc}${single ? '<div class=cond>single</div>' : ''}</td>` +
-        `<td>${c.start_a}-${c.stop_a}/${c.step_a}<div class=cond>${setup(c.device_mode_a)}</div>` +
-        `<div class=cond>${escapeHtml(c.conditions_a)}</div></td>` +
-        (single ? `<td></td>` :
+        `<td>${c.id}</td><td>${c.ts_utc}${timeNote}</td>` +
+        `<td>${blockA}</td>` +
+        (single ? `<td>${blockB}</td>` :
         `<td>${c.start_b}-${c.stop_b}/${c.step_b}<div class=cond>${setup(c.device_mode_b)}</div>` +
         `<div class=cond>${escapeHtml(c.conditions_b)}</div></td>`) +
-        `<td>${c.peak_dbm_a?.toFixed?.(1) ?? ''} @ ${c.peak_freq_a?.toFixed?.(1) ?? ''}</td>` +
+        `<td>${peakA}</td>` +
         `<td>${single ? '' : (c.peak_dbm_b?.toFixed?.(1) ?? '') + ' @ ' + (c.peak_freq_b?.toFixed?.(1) ?? '')}</td>` +
         `<td>${aLink} ${bLink}</td><td>${aData} ${bData}</td><td>${pdfLink}</td>`;
       b.appendChild(tr);

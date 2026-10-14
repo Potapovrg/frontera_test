@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 from pathlib import Path
 
+from testbench.autotest import AutoTestRunner
 from testbench.config import DEVICE_MODES, Config
 from testbench.db import JournalDB
 from testbench.device import DeviceManager
@@ -46,6 +48,8 @@ def main() -> int:
                     help="Frontera behind the shifter; blank -> /dev/frontera2 or probe")
     ap.add_argument("--switcher-port", default="",
                     help="frequency shifter; blank -> /dev/switcher or ping-probe")
+    ap.add_argument("--generator-port", default="",
+                    help="Arinst SSA-TG R3 generator; blank -> auto-detect by USB name")
     ap.add_argument("--device-mode", default=DEVICE_MODES[0], choices=DEVICE_MODES,
                     help="starting hardware topology (switchable in the UI)")
     ap.add_argument("--offset2-mhz", type=float, default=6000.0,
@@ -60,6 +64,7 @@ def main() -> int:
         device_port=args.device_port,
         device_port2=args.device_port2,
         switcher_port=args.switcher_port,
+        generator_port=args.generator_port,
         device_mode=args.device_mode,
         offset2_mhz=args.offset2_mhz,
         mock=args.mock,
@@ -76,14 +81,23 @@ def main() -> int:
         logger.error("server is up — pick a mode / check the connection in the web UI")
 
     db = JournalDB(str(cfg.db_path))
-    httpd = serve(cfg, device, db)
+    autotest = AutoTestRunner(cfg, device)
+    httpd = serve(cfg, device, db, autotest)
     logger.info("mode: %s | mock: %s", cfg.mode_label(), cfg.mock)
+
+    # SIGTERM (pkill on redeploy) takes the same path as Ctrl+C, so a running
+    # auto test gets to turn the generator off before the process exits.
+    def _terminate(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _terminate)
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        httpd.shutdown()
+        autotest.shutdown()
+        httpd.server_close()
         device.close()
     return 0
 
